@@ -1,0 +1,608 @@
+---
+title: "Detecting and responding to moralised misinformation"
+author:
+  - name: Matthew Andreotta
+    affil-id: 1
+  - name: Cécile Paris
+    affil-id: 2
+  - name: Ingrid van Putten
+    affil-id: 1
+  - name: Mark Hurlstone
+    affil-id: 3
+  - name: Iain Walker
+    affil-id: 4
+  - name: Fabio Boschetti
+    affil-id: 1
+affiliations: 
+  - id: 1
+    name: Environment, CSIRO
+  - id: 2
+    name: Data61, CSIRO
+  - id: 3
+    name: Department of Psychology, Lancaster University
+  - id: 4
+    name: Melbourne School of Psychological Sciences, University of Melbourne
+date: 2023/09/26
+date-format: "D MMMM YYYY"
+format:
+  revealjs:
+    template-partials: 
+        - title-slide.html
+    theme: [theme/presentation.scss]
+    logo: https://www.csiro.au/-/media/Web-team/Images/CSIRO_Logo/logo.png
+    center-title-slide: false
+    include-in-header: meta.html
+    height: 1080
+    width: 1920
+    view-distance: 100
+    mobile-view-distance: 100
+    fig-format: svg
+    self-contained: true
+    embed-resources: true
+bibliography: references/references.bib
+csl: references/apa_6.csl
+citations-hover: true
+reference-location: document
+fig-cap-location: bottom
+from: markdown+emoji
+execute: 
+  eval: true
+  cache: true
+  echo: false
+  include: true
+  warning: false
+knitr:
+    opts_chunk:
+        fig.path: assets/figures/
+        cache.extra: rand_seed
+---
+
+## Outline
+
+<br/>
+
+::: {.incremental}
+1. The **concept** of moralised mis/disinformation.
+2. A **tool** for detecting moral features of language.
+3. An **application** to environmental debates on Twitter/X.
+4. Other potential **applications**.
+:::
+
+```{r preamble}
+#| label: preamble
+#| include: false
+#| cache: false
+source("scripts/generate_meta.R")
+# 📦 Load packages-------------------------------------------------------------
+# Data wrangling
+library(arrow) # read parquets
+library(tidyverse) # data wrangling (including lubridate)
+library(janitor) # for cleaning names
+library(broom) # easy wrangling of results
+library(yaml)  # reading YAML files
+# Analysis
+library(splines) # for fitting curves
+# Presentation
+library(gt) # tables
+library(gtExtras) # more support for tables
+library(plotly) # interactive plots
+library(streamgraph) # interactive stacked area graphs
+library(showtext) # Fonts
+library(leaflet) # for maps
+library(DT) # interactive tables
+library(htmltools) # for html
+library(rcartocolor) # for palette
+library(ggwordcloud) # word visualisations
+library(svglite) # for exporting SVGs
+library(webshot) # for exporting widgets
+library(glue) # make strings
+# For parallel processing
+library(parallel)
+library(doParallel)
+library(doRNG)
+# Functions
+specify_decimal <- function(x, k = 2) trimws(format(round(x, k), nsmall=k))
+
+```
+
+```{r import-data}
+#| label: import-data
+climate_change_phrases <- c(
+    "climate change", "climatechange", "climate",
+    "globalwarming", "global warming"
+    )
+condition <- tibble(
+    baseline = list(c(
+        climate_change_phrases,
+        "climateemergency", "climateaction", "climatestrike", "climateelection"
+    )),
+    contrarian = list(c(
+        "climatescam", "climateconspiracy", "globalwarmingfraud", "climatelockdowns", "noclimateemergency", "climatefraud", "climatecult", "climatehoax", "globalcooling", 
+        glue("{climate_change_phrases} lie.*"),
+        glue("{climate_change_phrases} fearmongering"),
+        glue("{climate_change_phrases} conspiracy"),
+        glue("{climate_change_phrases} scam"),
+        glue("{climate_change_phrases} hysteria"),
+        glue("{climate_change_phrases} panic"),
+        glue("{climate_change_phrases} hoax"),
+        glue("{climate_change_phrases} fraud"),
+        glue("{climate_change_phrases} lockdown"),
+        glue("{climate_change_phrases} alarmis.*")
+    ))) |>
+    pivot_longer(everything(), names_to = "condition", values_to = "phrase") |>
+    mutate(condition = factor(condition, levels = c("baseline", "contrarian"))) |>
+    unnest(phrase) |>
+    mutate(query = glue("\\b{phrase}\\b")) 
+
+tweets_all <- open_dataset(sources = "../../output/tweets_esa-reefs/gbr/moral_sentiment") |>
+    filter(to_analyse & has_embedding) |>
+    select(id) |>
+    collect()
+tweets_all <- tweets_all |>
+    mutate(batch = 1:n() %/% 10000) |>
+    group_by(batch) |>
+    group_modify(
+        ~ open_dataset(sources = "../../output/tweets_esa-reefs/_documents/words") |>
+            filter(id %in% .x$id) |>
+            arrange(id, id_sent, id_token) |>
+            select(id, lemma) |>
+            collect() |>
+            group_by(id) |>
+            summarise(text = str_flatten(lemma, collapse = " "))
+    ) |>
+    ungroup()
+# Find tweets matching query
+tweets_matching_query <- condition |>
+    group_by(condition) |>
+    summarise(
+        query = str_flatten(glue("({query})"), "|"),
+        phrase = list(phrase)
+    ) |>
+    group_by(condition) |>
+    group_modify(
+        ~ filter(tweets_all, str_detect(text, .x$query[1]))
+    ) |>
+    # If a tweet is in both conditions, label it as sceptical
+    group_by(id) |>
+    filter(!(n_distinct(condition) == 2 & condition == "baseline")) |>
+    ungroup()
+users <- open_dataset(sources = "../../output/tweets_esa-reefs/_documents/metadata") |>
+    select(id, id_user) |>
+    filter(id %in% tweets_matching_query$id) |>
+    left_join(tweets_matching_query, by = "id") |>
+    collect() |>
+    group_by(id_user) |>
+    summarise(
+        condition = factor(
+            max(as.integer(condition)),
+            levels = 1:2,
+            labels = levels(condition)
+            ),
+        n_tweets = n()
+    ) |>
+    ungroup()
+data <- open_dataset(sources = "../../output/tweets_esa-reefs/_documents/metadata") |>
+    select(id, id_user) |>
+    right_join(users, by = "id_user") |>
+    select(id, id_user, condition) |>
+    left_join(
+        open_dataset(sources = "../../output/tweets_esa-reefs/gbr/moral_sentiment"),
+        by = "id"
+    ) |>
+    filter(to_analyse & has_embedding) |>
+    select(id, id_user, condition, relevance) |>
+    collect() |>
+    mutate(recognition = !is.na(relevance)) |>
+    left_join(select(tweets_all, id, text), by = "id")
+# Load entities
+entities <- yaml.load_file(
+    input = "../../output/tweets_esa-reefs/gbr/moral_entities-annotations/entities.yaml",
+    readLines.warn = FALSE    
+    )
+entities <- pmap(
+    list(phrase = entities, name = names(entities)),
+    function(phrase, name) tibble(entity = name, phrase = phrase)
+    ) |>
+    bind_rows() |>
+    filter(!str_detect(phrase, "^@"))
+data_entities <- entities |>
+    filter(entity == 'government') |>
+    add_case(entity = "science", phrase = c("scientist", "scientists", "science", "sciences")) |>
+  #  add_case(entity = "bleaching", phrase = c(entity, "bleach", "bleached", "bleaches")) |>
+    add_case(entity = "climate change", phrase = condition$phrase) |>
+    group_by(entity) |>
+    group_modify(
+        ~ filter(data, str_detect(text, str_flatten(glue("(\\b{.x$phrase}\\b)"), "|")))
+    ) |>
+    ungroup()
+```
+
+```{r}
+#| label: experiment
+results <- tibble(sentiment = c('recognition', 'relevance')) |>
+    group_by(sentiment) |>
+    mutate(lm_formula = glue("{sentiment} ~ 1 + condition")) |>
+    mutate(lm_model = list(
+        glm(
+            as.formula(lm_formula),
+            data = data,
+            family = quasibinomial(link = "logit")
+        ))) |>  
+    ungroup() |>
+    mutate(results = pmap(list(lm_model), tidy)) |>
+    unnest(results) |>
+    clean_names() |>
+    select(-lm_model)  |>
+    group_by(sentiment) |>
+    summarise(
+        log_odds_diff = estimate[term == "conditioncontrarian"],
+        log_odds_diff_std_error = std_error[term == "conditioncontrarian"],
+        log_odds_p_value = p_value[term == "conditioncontrarian"],
+        log_odds_baseline = estimate[term == "(Intercept)"],
+        log_odds_contrarian = log_odds_baseline + log_odds_diff,
+        odds_baseline = exp(log_odds_baseline),
+        odds_contrarian = exp(log_odds_contrarian),
+    )
+
+results_entities <- data_entities |>
+    group_by(entity) |>
+    group_modify(
+        ~ tibble(sentiment = c('recognition', 'relevance')) |>
+            group_by(sentiment) |>
+            mutate(lm_formula = glue("{sentiment} ~ 1 + condition")) |>
+            mutate(lm_model = list(
+                glm(
+                    as.formula(lm_formula),
+                    data = .x,
+                    family = quasibinomial(link = "logit")
+                )))
+    ) |>  
+    ungroup() |>
+    mutate(results = pmap(list(lm_model), tidy)) |>
+    unnest(results) |>
+    clean_names() |>
+    select(-lm_model)  |>
+    group_by(sentiment, entity) |>
+    summarise(
+        log_odds_diff = estimate[term == "conditioncontrarian"],
+        log_odds_diff_std_error = std_error[term == "conditioncontrarian"],
+        log_odds_p_value = p_value[term == "conditioncontrarian"],
+        log_odds_baseline = estimate[term == "(Intercept)"],
+        log_odds_contrarian = log_odds_baseline + log_odds_diff,
+        odds_baseline = exp(log_odds_baseline),
+        odds_contrarian = exp(log_odds_contrarian),
+    ) |>
+    ungroup()
+
+results <- results |>
+    mutate(entity = NA) |>
+    add_case(results_entities)
+
+results <- results  |>
+    mutate(p_baseline = odds_baseline / (1 + odds_baseline)) |>
+    mutate(p_contrarian = odds_contrarian / (1 + odds_contrarian)) |>
+    mutate(p_diff = p_contrarian - p_baseline)
+
+```
+
+```{r}
+#| label: add_confidence_intervals
+# n_bootstraps <- 3
+# clusters <- makeCluster(max(c(detectCores() - 1, 1)))
+# registerDoParallel(clusters)
+# bootstraps <- foreach(
+#     ent = rep(n_bootstraps),
+#     .packages = c("dplyr", "tidyr", "glue", "purrr", "broom"),
+#     .options.RNG = 097654) %dorng% {
+#     # generate bootstrap
+#     boot_data <- data |>
+#         slice_sample(prop = 1, replace = TRUE)
+#     # calculate relevant parameters
+#     boot_result <- tibble(sentiment = c('recognition', 'relevance')) |>
+#         group_by(sentiment) |>
+#         mutate(lm_formula = glue("{sentiment} ~ 1 + condition")) |>
+#         mutate(lm_model = list(
+#             glm(
+#                 as.formula(lm_formula),
+#                 data = boot_data,
+#                 family = quasibinomial(link = "logit")
+#             ))) |>  
+#         ungroup() |>
+#         mutate(results = pmap(list(lm_model), tidy)) |>
+#         unnest(results) |>
+#         select(-lm_model)
+#     return(boot_result)
+# }
+
+
+# bootstraps_entities <- foreach(
+#     ent = rep(n_bootstraps),
+#     .packages = c("dplyr", "tidyr"),
+#     .options.RNG = 097654) %dorng% {
+#     # generate bootstrap
+#     boot_data <- data_entities |>
+#         group_by(entity) |>
+#         slice_sample(prop = 1, replace = TRUE)
+#     # calculate relevant parameters
+#     boot_result <- boot_data |>
+#         group_by(entity) |>
+#         group_modify(
+#             ~ tibble(sentiment = c('recognition', 'relevance')) |>
+#                 group_by(sentiment) |>
+#                 mutate(lm_formula = glue("{sentiment} ~ 1 + condition")) |>
+#                 mutate(lm_model = list(
+#                     glm(
+#                         as.formula(lm_formula),
+#                         data = .x,
+#                         family = quasibinomial(link = "logit")
+#                     )))
+#         ) |>
+#         ungroup() |>
+#         mutate(results = pmap(list(lm_model), tidy)) |>
+#         unnest(results) |>
+#         select(-lm_model)
+#     return(boot_result)
+#     }
+# stopCluster(clusters)
+# bootstraps |>
+#         group_by(sentiment, entity) |>
+#         summarise(
+#             log_odds_diff = estimate[term == "conditioncontrarian"],
+#             log_odds_baseline = estimate[term == "(Intercept)"],
+#             log_odds_contrarian = log_odds_baseline + log_odds_diff,
+#             odds_baseline = exp(log_odds_baseline),
+#             odds_contrarian = exp(log_odds_contrarian),
+#         ) |>
+#         ungroup()
+
+
+```
+
+```{r}
+# vocab <- open_dataset(sources = "../../output/tweets_esa-reefs/gbr/moral_vocabulary") |>
+#     filter(!is.na(relevance)) |>
+#     select(lemma, relevance, polarity) |>
+#     collect()
+
+# results |>
+#     filter(sentiment == 'relevance' & is.na(entity)) |>
+#     bind_cols(vocab) |>
+#     filter(polarity < .50) |>
+#     mutate(dist_baseline = abs(p_baseline - relevance)) |>
+#     mutate(dist_contrarian = abs(p_contrarian - relevance)) |>
+#     arrange(dist_contrarian)
+```
+
+## Disinformation narratives about the Russo-Ukrainian War
+
+::: {.incremental}
+
+- Examples of pro-Russian disinformation [@newsguard_2023]:
+    - Russian-speaking residents in Donbas were subjected to genocide.
+    - Nazi ideology is driving Ukraine's political leadership.
+    - The U.S. has a network of bioweapons labs in Eastern Europe.
+- Each narrative uses moral convictions to frame Ukraine and its allies negatively.
+- **Moral convictions** are ideas or feelings of what is fundamentally right or wrong, good or evil, just or unjust [@skitka_2021; @malle_2021].
+- **Moralised messages** are messages that embed _attitudes, objects, activity, or rhetoric_ in moral convictions [@skitka_2021; @rozin_1999; @malle_2021].
+:::
+
+::: {.notes}
+- Among the real atrocities of the Russo-Ukrainian conflict are faked or misleading narratives.
+- Russian disinformation paints Ukraine as a society rife with genocidal nazis who collude with subversive and violent allies.
+- Although disparate in topic, these narratives share a common characteristic.
+- Each narrative claim Ukraine or its allies violated moral convictions.
+- By moral convictions, I refer to a sense of what is right or wrong, good or evil, just or unjust
+- Moralised messages, be it about fact or fiction, refer to attempts to shift perceptions into a moral domain or heighten existing moral convictions
+- E.g., attempt to link moral concern around nazis with Ukraine's leadership or heighten existing moral concerns with Ukraine's leadership.
+:::
+
+## Moralised messages
+
+::: {.incremental}
+- Disinformation and misinformation can be particularly moralised.
+- Moralised language is more prominent in articles from non-reputable sources [@carrasco-farre_2022].
+- Though, moralised messages are not necessarily less true than neutral messages.
+- E.g., North Atlantic Treaty Organization (NATO) and Vladimir Putin's public addresses in late February, 2022 both leveraged moralised language [@demasi_2022].
+:::
+
+::: {.notes}
+- Russian disinformation is not alone in being moralised
+- A study of nearly 100,000 articles found moralised language was more prominent in articles from non-reputable sources
+- I am NOT saying moralised messages are necessarily untrue and 'neutral' messages are always true
+- In fact, both NATO and Putin used moralised language in their public addresses, which framed each other as immoral aggressors and their own actions as morally righteous and necessary.
+- This is not by chance.
+- Moral messages that resonate with their audience can be particularly powerful.
+:::
+
+## The consequences of moralised messages
+
+::: {.incremental}
+
+Moralised messages can grant their audience three licenses:
+
+1. **License to be uncompromising**
+    - Intolerance of disagreement [@garrett_2020; @skitka_2021].
+    - Harder to persuade [@kodapanakkal_2022a; @ryan_2017].
+
+2. **License to act with with the like-minded**
+    - Cooperation and selflessness [@curry_2019a; @spring_2018; @hoover_2018].
+    - Violence and hate [@kennedy_2023; @solovev_2022].
+
+3. **License to share falsehoods**
+    - Moral contagion [@brady_2020; @brady_2023; @brady_2021a].
+    - Illusory truth effects [@ecker_2022].
+    - Pre-factual thinking and gist [@helgason_2022].
+:::
+
+::: {.notes}
+
+- **Uncompromising**
+- People who hold moralised attitudes, which portray an entity as morally righteous or evil, can be unwilling to compromise on their positions and resist counter-attitudinal messages, sometimes with anger
+- **Act with the like-minded**
+- (+) cooperation, selflessness; (-) violence; hate.
+- Collaborate more with an in-group and distance oneself from the out-group (differently-minded).
+- Compels us to put group's goals before our own. Can be a source of cooperation and selflessness, but might compel one to permit or enact violence and hate.
+- **Share falsehoods**.
+- Generally, people are more likely to share negative, moralised messages on social media.
+- Repeated exposure to these messages can create feelings of familiarity, which conjure an illusion of truth.
+- On top of this, moral convictions might encourage us to share misinformation or excuse those who circulate falsehoods.
+- That is, disseminating misinformation can become a moral task in its own right.
+- In what has been called 'pre-factual thinking', one might share or permit the sharing of falsehood when the gist of that falsehood is congruent with a moral stance.
+- These three licenses give moral misinformation a broad and powerful appeal.
+:::
+
+## Detecting moralised messages in text
+
+::: {.incremental}
+
+- Moral sentiment inference algorithm [@xie_2019; @ramezani_2021].
+- Natural Language Processing approach which uses word embeddings.
+- Basic idea: words used alongside the same words (neighbours) have similar meaning.
+
+- > "You shall know a word by the company it keeps" [@firth_1957, pg. 11].
+
+- Identified word embeddings from large collection of news articles [known as word2vec, @mikolov_2013].
+- Are the words of a text closer in meaning to moral words or neutral words?
+- Moral words include: "altruism", "pledged", "scripture", "deceit", "inhuman", "kill" [@graham_2009].
+- Neutral words include: "anvil", "anytime", "rudder" [@warriner_2013].
+- Calculate probability that a text is moral (*p<sub>moral</sub>*) or neutral (*p<sub>neutral</sub>*).
+
+- This approach has been used to detect historic changes in moral perceptions, such as perceptions of American democracy and slavery [@xie_2019; @ramezani_2021].
+
+:::
+
+::: {.notes}
+- This basic idea 'powers' many AI tools you may have encountered, like ChatGPT
+- (e.g., "Facebook" and "Twitter")
+:::
+
+---
+
+## What does *p<sub>moral</sub>* tell us about a message?
+
+::: {.incremental}
+
+Quantify two characteristics:
+
+1. **Moral recognition** - whether an message is at all related to moral convictions.
+    - For any word in a message, is *p<sub>moral</sub>* larger than *p<sub>neutral</sub>*?
+    - Changes can reflect a shift from preference or narrow opinion [@skitka_2021].
+2. **Moral relevance** - degree to which message is related to moral convictions.
+    - For moral words, how large is *p<sub>moral</sub>*?
+    - Changes can reflect a shift in intensity of moral conviction [@skitka_2021].
+:::
+
+::: {.notes}
+- Moral recognition => shift from preference to moral imperative
+- Moral relevance => heightens polarisation, motivations
+- Could list other applications: domain of moral concern, and polarity
+:::
+
+## An application: moralisation of the Great Barrier Reef by climate change contrarians
+
+```{r}
+#| label: method
+methods <- data |>
+    group_by(condition) |>
+    summarise(
+        n_tweets = n(),
+        n_users = n_distinct(id_user)
+    ) |>
+    mutate(across(everything(), \(.num) prettyNum(.num, ",")))
+```
+
+::: {.incremental}
+- Broad scientific consensus that climate change is predominantly caused by human activity [@cook2013; @veckalov_2023].
+- Contrarian arguments challenge scientific consensus and policy implications [@coan_2021; @lamb_2020].
+- Great Barrier Reef is a battleground for climate change debates [@konkes_2021].
+    - 'Bleaching is a sign of catastrophic climate change'.
+    - 'Whenever the reef is bleached, it always recovers'.
+:::
+
+::: {.notes}
+- There is a broad scientific concensus that climate change is predominantly caused by human activity
+- However, contrarian arguments challenge scientific consensus or its policy implications, such as by claiming climate change is part of a natural fluctuation or that the consesquences are overstated by scientists.
+- Sometimes, this misleading contrarian messages might directly challenge scientific conclusions, but other times, they may take the form of diffuse messages that erode support for climate change mitigation policies.
+- The Great Barrier Reef is a historic battleground, where activists and contrarians have vied to persuade others of their cause.
+- Consider coral bleaching, where coral under stress loses their vibrant colours. A climate change activist might say ..., whereas a contrarian might say ...
+:::
+
+## An application: moralisation of the Great Barrier Reef by climate change contrarians
+
+::: {.callout-note appearance="simple"}
+### Research Question
+Do climate change contrarians post more moralised messages about the Great Barrier Reef than other users who post about climate change?
+:::
+
+::: {.incremental}
+- Used tweet archive from CSIRO's Emergency Situation Awareness platform [@csiro_2023; @power2014; @power_2023].
+- Retrieved English tweets posted by Australian users that mentioned the Great Barrier Reef.
+- Examined two groups of users based on text in tweets:
+    1. **Contrarians**. `r methods$n_users[2]` users who posted `r methods$n_tweets[2]` tweets (e.g., "#ClimateCult", "alaramists")
+    2. **Baseline**. `r methods$n_users[1]` users who posted `r methods$n_tweets[1]` tweets (e.g., "#ClimateChange", "#ClimateAction")
+:::
+
+::: {.notes}
+- The Emergency Situation Awareness has streamed and archived tweets.
+- Specifically, from accounts identified as posting from Australia via diagnostic features, such as geolocation information, and places mentioned in user biographies and tweets.
+- We retrieved English tweets posted by Australian users that mentioned the Great Barrier Reef (or “#greatbarrierreef”), posted between October 2011 and April 2023.
+:::
+
+---
+
+## An application: moralisation of the Great Barrier Reef by climate change contrarians
+
+::: {.incremental}
+- Generally, content was moralised and negative (e.g., "immoral", "vile", "selfishness").
+-  **Moral recongition**. The proportion of moral tweets posted by contrarians (`r specify_decimal(filter(results, sentiment == 'recognition' & is.na(entity))$p_contrarian * 100)`%) was greater than the proportion of moral tweets posted by the baseline (`r specify_decimal(filter(results, sentiment == 'recognition' & is.na(entity))$p_baseline * 100)`%), *p* < .001.
+- **Moral relevance**. The intensity of moral tweets was greater for contrarians (*p<sub>moral</sub>* = `r specify_decimal(filter(results, sentiment == 'relevance' & is.na(entity))$p_contrarian, 4)`) than the baseline group (*p<sub>moral</sub>* = `r specify_decimal(filter(results, sentiment == 'relevance' & is.na(entity))$p_baseline, 4)`), *p* = `r specify_decimal(filter(results, sentiment == 'relevance' & is.na(entity))$log_odds_p_value, 3)`.
+- Contrarians uploaded more moral content about the Great Barrier Reef than other users.
+:::
+
+::: {.notes}
+- Contrarians uploaded more moral content about the Great Barrier Reef than other users. For contrarians, discourse of the Great Barrier Reef was more often, and more strongly, connected to broader moral convictions on what is right and wrong.
+- However, other users also often share moralised messages.
+- Indicates a hostile space, where 'both sides' may be uncompromising, hostile to alternative views, and might be vulnerable to sharing falsehoods consistent with ones moral stance.
+:::
+
+## Other applications
+
+::: {.incremental}
+
+- Detecting moralised messages of the Great Barrier Reef:
+    - Moralised messages at the level of an entity ('thing').
+    - Moralised messages at the level of users.
+- Tracking moralised messages over time, of a particular entity or emerging event.
+- Can be used to indicate polarity (vices versus virtues) and domain of moral concern (e.g., fairness, harm).
+- Can inform communication strategies [@feinberg_2019; @kodapanakkal_2022a]:
+    - **Moral framing**. Messages that appeal to the perceived moral basis of an issue.
+    - **Non-moral framing**. Neutral messages to de-escalate conflict.
+- Approach to detecting moralised messages in any text (e.g., news articles, speeches).
+- Can be useful across different topics.
+- Can be useful when truth is not known and emerging.
+:::
+
+::: {.notes}
+- Skip if out of time
+:::
+
+## Summary
+
+> Misinformation may be more consequential and likely when messages are moralised.
+
+::: {.incremental}
+- Disinformation and misinformation are often embedded in broader moral convictions of what is right and wrong.
+- Moral convictions can motivate people to be uncompromising, be hostile to those with different views, and share misinformation.
+- Moralised messages are not necessarily false.
+- Detecting moralised messages can help identify issues where falsehoods are more likely to be shared, to be believed, and to be consequential.
+- Moralised messages can be detected by a moral sentiment inference algorithm.
+- An application demonstrated users who posted climate change contrarian content are more likely to post moralised messages about the Great Barrier Reef than other users.
+:::
+
+
+<br>
+<br>
+<p class="download"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" style="height:1em;width:1em;vertical-align:-0.125em;margin-left:auto;margin-right:auto;font-size:inherit;fill:black;overflow:visible;position:relative;"><!--! Font Awesome Pro 6.4.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. --><path d="M326.612 185.391c59.747 59.809 58.927 155.698.36 214.59-.11.12-.24.25-.36.37l-67.2 67.2c-59.27 59.27-155.699 59.262-214.96 0-59.27-59.26-59.27-155.7 0-214.96l37.106-37.106c9.84-9.84 26.786-3.3 27.294 10.606.648 17.722 3.826 35.527 9.69 52.721 1.986 5.822.567 12.262-3.783 16.612l-13.087 13.087c-28.026 28.026-28.905 73.66-1.155 101.96 28.024 28.579 74.086 28.749 102.325.51l67.2-67.19c28.191-28.191 28.073-73.757 0-101.83-3.701-3.694-7.429-6.564-10.341-8.569a16.037 16.037 0 0 1-6.947-12.606c-.396-10.567 3.348-21.456 11.698-29.806l21.054-21.055c5.521-5.521 14.182-6.199 20.584-1.731a152.482 152.482 0 0 1 20.522 17.197zM467.547 44.449c-59.261-59.262-155.69-59.27-214.96 0l-67.2 67.2c-.12.12-.25.25-.36.37-58.566 58.892-59.387 154.781.36 214.59a152.454 152.454 0 0 0 20.521 17.196c6.402 4.468 15.064 3.789 20.584-1.731l21.054-21.055c8.35-8.35 12.094-19.239 11.698-29.806a16.037 16.037 0 0 0-6.947-12.606c-2.912-2.005-6.64-4.875-10.341-8.569-28.073-28.073-28.191-73.639 0-101.83l67.2-67.19c28.239-28.239 74.3-28.069 102.325.51 27.75 28.3 26.872 73.934-1.155 101.96l-13.087 13.087c-4.35 4.35-5.769 10.79-3.783 16.612 5.864 17.194 9.042 34.999 9.69 52.721.509 13.906 17.454 20.446 27.294 10.606l37.106-37.106c59.271-59.259 59.271-155.699.001-214.959z"/></svg>&nbsp;<b>Link to slides:</b>&nbsp;<a href="https://matt-lab.github.io/matt-lab.github.io/workshop_2023-moralised-misinformation">matt-lab.github.io/workshop_moral-misinformation</a></p>
+<p class="download"><svg xmlns="http://www.w3.org/2000/svg" height="1em" viewBox="0 0 512 512"><!--! Font Awesome Free 6.4.2 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. --><path d="M48 64C21.5 64 0 85.5 0 112c0 15.1 7.1 29.3 19.2 38.4L236.8 313.6c11.4 8.5 27 8.5 38.4 0L492.8 150.4c12.1-9.1 19.2-23.3 19.2-38.4c0-26.5-21.5-48-48-48H48zM0 176V384c0 35.3 28.7 64 64 64H448c35.3 0 64-28.7 64-64V176L294.4 339.2c-22.8 17.1-54 17.1-76.8 0L0 176z"/></svg>&nbsp;<b>Email:</b>&nbsp;<a href="mailto:matthew.andreotta@csiro.au">matthew.andreotta@csiro.au</a></p>
+
+## References
