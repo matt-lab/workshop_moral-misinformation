@@ -585,7 +585,7 @@ data |>
     geom_segment(aes(x=foundation, xend=foundation, y=baseline, yend=contrarian), color="black", linewidth = 2) +
     geom_point(aes(x=foundation, y=baseline), color="#009392", size= 7 ) +
     geom_point(aes(x=foundation, y=contrarian), color="#d0587e", size= 7 ) +
-    annotate("text", x = 4.5, y = 54.8, label = "Baseline", colour = "#009392", size = 7) +
+    annotate("text", x = 4.5, y = 59.8, label = "Baseline", colour = "#009392", size = 7) +
     annotate("text", x = 4.5, y = 45.4, label = "Contrarian", colour = "#d0587e", size = 7) +
     coord_flip() +
     # Add theme

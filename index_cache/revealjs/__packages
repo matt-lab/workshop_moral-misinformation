@@ -11,6 +11,8 @@ stringr
 forcats
 lubridate
 janitor
+broom
+yaml
 gt
 gtExtras
 plotly
@@ -31,5 +33,3 @@ iterators
 doParallel
 rngtools
 doRNG
-broom
-yaml
