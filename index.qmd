@@ -62,10 +62,10 @@ knitr:
 <br/>
 
 ::: {.incremental}
-1. The **concept** of moralised mis/disinformation.
-2. A **tool** for detecting moral features of language.
-3. An **application** to environmental debates on Twitter/X.
-4. Other potential **applications**.
+1. The **concept** of moralised misinformation.
+2. A **tool** for detecting moral messages.
+3. An **application** of the tool to environment discourse on Twitter/X.
+4. Potential **applications** for the Russo-Ukraine War.
 :::
 
 ```{r preamble}
@@ -102,7 +102,45 @@ library(doParallel)
 library(doRNG)
 # Functions
 specify_decimal <- function(x, k = 2) trimws(format(round(x, k), nsmall=k))
+# 🖌️ Set up plot defaults------------------------------------------------------
+# Set colours for plots
+colour_background <- "#FFFFFF"
+colour_text <- "#000000"
+colour_grid <- "#787878"
+# Set fonts for plots
+font_text <- "Tahoma"
 
+# Set theme
+theme_main <- function(
+  col_background = colour_background,
+  col_text = colour_text,
+  col_grid = colour_grid,
+  font = font_text) {    
+    # Begin construction of chart
+    theme_bw(base_size = 15) +
+    # Format the grid
+    theme(panel.background = element_rect(fill = col_background, colour = col_background)) +
+    theme(plot.background  = element_rect(fill = col_background, colour = col_background)) +
+    theme(panel.border       = element_blank()) +
+    theme(panel.grid.major.x = element_blank()) +
+    theme(panel.grid.minor.x = element_blank()) +
+    theme(panel.grid.major.y = element_blank()) +
+    theme(panel.grid.minor.y = element_blank()) +
+    theme(axis.ticks         = element_blank()) +
+    theme(axis.ticks.x.bottom= element_line(colour = col_grid)) +
+    theme(axis.ticks.y.left  = element_line(colour = col_grid)) +
+    theme(axis.line          = element_line(colour = col_text)) +
+    # Format the legend
+    theme(legend.position = "none") +
+    # Format title and axis labels
+    theme(plot.title    = element_blank()) +
+    theme(plot.subtitle = element_blank()) +
+    theme(plot.caption  = element_blank()) +
+    theme(axis.title.x  = element_text(size = 16, colour = col_text, hjust = 0.5, vjust = 0.5, face = "bold", family = font)) +
+    theme(axis.title.y  = element_text(size = 16, colour = col_text, hjust = 0.5, vjust = 0.5, face = "bold", family = font)) +
+    theme(axis.text.x   = element_text(size = 14, colour = col_text, hjust = 1, vjust = 0.5, family = font, face = "bold")) +
+    theme(axis.text.y   = element_text(size = 14, colour = col_text, hjust = 1, vjust = 0.5, family = font, face = "bold"))
+}
 ```
 
 ```{r import-data}
@@ -190,235 +228,47 @@ data <- open_dataset(sources = "../../output/tweets_esa-reefs/_documents/metadat
         by = "id"
     ) |>
     filter(to_analyse & has_embedding) |>
-    select(id, id_user, condition, relevance) |>
+    select(id, id_user, condition, relevance, polarity, ends_with(".vice")) |>
     collect() |>
-    mutate(recognition = !is.na(relevance)) |>
-    left_join(select(tweets_all, id, text), by = "id")
-# Load entities
-entities <- yaml.load_file(
-    input = "../../output/tweets_esa-reefs/gbr/moral_entities-annotations/entities.yaml",
-    readLines.warn = FALSE    
-    )
-entities <- pmap(
-    list(phrase = entities, name = names(entities)),
-    function(phrase, name) tibble(entity = name, phrase = phrase)
-    ) |>
-    bind_rows() |>
-    filter(!str_detect(phrase, "^@"))
-data_entities <- entities |>
-    filter(entity == 'government') |>
-    add_case(entity = "science", phrase = c("scientist", "scientists", "science", "sciences")) |>
-  #  add_case(entity = "bleaching", phrase = c(entity, "bleach", "bleached", "bleaches")) |>
-    add_case(entity = "climate change", phrase = condition$phrase) |>
-    group_by(entity) |>
-    group_modify(
-        ~ filter(data, str_detect(text, str_flatten(glue("(\\b{.x$phrase}\\b)"), "|")))
-    ) |>
-    ungroup()
-```
-
-```{r}
-#| label: experiment
-results <- tibble(sentiment = c('recognition', 'relevance')) |>
-    group_by(sentiment) |>
-    mutate(lm_formula = glue("{sentiment} ~ 1 + condition")) |>
-    mutate(lm_model = list(
-        glm(
-            as.formula(lm_formula),
-            data = data,
-            family = quasibinomial(link = "logit")
-        ))) |>  
+    left_join(select(tweets_all, id, text), by = "id") |>
+    clean_names()
+data <- data |>
+    mutate(recognition = !is.na(relevance) & relevance > .50) |>
+    mutate(is_vice = polarity < .50) |>
+    rowwise() |>
+    mutate(foundation = ifelse(
+        is_vice,
+        which.max(
+            c(authority_vice,
+            care_vice,
+            fairness_vice,
+            loyalty_vice,
+            sanctity_vice)),
+        NA
+    )) |>
     ungroup() |>
-    mutate(results = pmap(list(lm_model), tidy)) |>
-    unnest(results) |>
-    clean_names() |>
-    select(-lm_model)  |>
-    group_by(sentiment) |>
-    summarise(
-        log_odds_diff = estimate[term == "conditioncontrarian"],
-        log_odds_diff_std_error = std_error[term == "conditioncontrarian"],
-        log_odds_p_value = p_value[term == "conditioncontrarian"],
-        log_odds_baseline = estimate[term == "(Intercept)"],
-        log_odds_contrarian = log_odds_baseline + log_odds_diff,
-        odds_baseline = exp(log_odds_baseline),
-        odds_contrarian = exp(log_odds_contrarian),
-    )
-
-results_entities <- data_entities |>
-    group_by(entity) |>
-    group_modify(
-        ~ tibble(sentiment = c('recognition', 'relevance')) |>
-            group_by(sentiment) |>
-            mutate(lm_formula = glue("{sentiment} ~ 1 + condition")) |>
-            mutate(lm_model = list(
-                glm(
-                    as.formula(lm_formula),
-                    data = .x,
-                    family = quasibinomial(link = "logit")
-                )))
-    ) |>  
-    ungroup() |>
-    mutate(results = pmap(list(lm_model), tidy)) |>
-    unnest(results) |>
-    clean_names() |>
-    select(-lm_model)  |>
-    group_by(sentiment, entity) |>
-    summarise(
-        log_odds_diff = estimate[term == "conditioncontrarian"],
-        log_odds_diff_std_error = std_error[term == "conditioncontrarian"],
-        log_odds_p_value = p_value[term == "conditioncontrarian"],
-        log_odds_baseline = estimate[term == "(Intercept)"],
-        log_odds_contrarian = log_odds_baseline + log_odds_diff,
-        odds_baseline = exp(log_odds_baseline),
-        odds_contrarian = exp(log_odds_contrarian),
-    ) |>
-    ungroup()
-
-results <- results |>
-    mutate(entity = NA) |>
-    add_case(results_entities)
-
-results <- results  |>
-    mutate(p_baseline = odds_baseline / (1 + odds_baseline)) |>
-    mutate(p_contrarian = odds_contrarian / (1 + odds_contrarian)) |>
-    mutate(p_diff = p_contrarian - p_baseline)
-
+    mutate(foundation = factor(foundation, levels = 1:5, labels = c("subversion", "harm", "cheating", "betrayal", "degradation")))
 ```
 
-```{r}
-#| label: add_confidence_intervals
-# n_bootstraps <- 3
-# clusters <- makeCluster(max(c(detectCores() - 1, 1)))
-# registerDoParallel(clusters)
-# bootstraps <- foreach(
-#     ent = rep(n_bootstraps),
-#     .packages = c("dplyr", "tidyr", "glue", "purrr", "broom"),
-#     .options.RNG = 097654) %dorng% {
-#     # generate bootstrap
-#     boot_data <- data |>
-#         slice_sample(prop = 1, replace = TRUE)
-#     # calculate relevant parameters
-#     boot_result <- tibble(sentiment = c('recognition', 'relevance')) |>
-#         group_by(sentiment) |>
-#         mutate(lm_formula = glue("{sentiment} ~ 1 + condition")) |>
-#         mutate(lm_model = list(
-#             glm(
-#                 as.formula(lm_formula),
-#                 data = boot_data,
-#                 family = quasibinomial(link = "logit")
-#             ))) |>  
-#         ungroup() |>
-#         mutate(results = pmap(list(lm_model), tidy)) |>
-#         unnest(results) |>
-#         select(-lm_model)
-#     return(boot_result)
-# }
+---
 
+![](assets/mtg.png){height=400 fig-align="center"}
 
-# bootstraps_entities <- foreach(
-#     ent = rep(n_bootstraps),
-#     .packages = c("dplyr", "tidyr"),
-#     .options.RNG = 097654) %dorng% {
-#     # generate bootstrap
-#     boot_data <- data_entities |>
-#         group_by(entity) |>
-#         slice_sample(prop = 1, replace = TRUE)
-#     # calculate relevant parameters
-#     boot_result <- boot_data |>
-#         group_by(entity) |>
-#         group_modify(
-#             ~ tibble(sentiment = c('recognition', 'relevance')) |>
-#                 group_by(sentiment) |>
-#                 mutate(lm_formula = glue("{sentiment} ~ 1 + condition")) |>
-#                 mutate(lm_model = list(
-#                     glm(
-#                         as.formula(lm_formula),
-#                         data = .x,
-#                         family = quasibinomial(link = "logit")
-#                     )))
-#         ) |>
-#         ungroup() |>
-#         mutate(results = pmap(list(lm_model), tidy)) |>
-#         unnest(results) |>
-#         select(-lm_model)
-#     return(boot_result)
-#     }
-# stopCluster(clusters)
-# bootstraps |>
-#         group_by(sentiment, entity) |>
-#         summarise(
-#             log_odds_diff = estimate[term == "conditioncontrarian"],
-#             log_odds_baseline = estimate[term == "(Intercept)"],
-#             log_odds_contrarian = log_odds_baseline + log_odds_diff,
-#             odds_baseline = exp(log_odds_baseline),
-#             odds_contrarian = exp(log_odds_contrarian),
-#         ) |>
-#         ungroup()
+"Now, what if these [American] biolabs are handling very dangerous pathogens that may lead to the deaths in people in the areas? There are reports of possibly deadly pathogens escaping these biolabs in places like Ukraine, Georgia, Kazakhstan, that is responsible for killing people." [@greene_2022]
 
-
-```
-
-```{r}
-# vocab <- open_dataset(sources = "../../output/tweets_esa-reefs/gbr/moral_vocabulary") |>
-#     filter(!is.na(relevance)) |>
-#     select(lemma, relevance, polarity) |>
-#     collect()
-
-# results |>
-#     filter(sentiment == 'relevance' & is.na(entity)) |>
-#     bind_cols(vocab) |>
-#     filter(polarity < .50) |>
-#     mutate(dist_baseline = abs(p_baseline - relevance)) |>
-#     mutate(dist_contrarian = abs(p_contrarian - relevance)) |>
-#     arrange(dist_contrarian)
-```
-
-## Disinformation narratives about the Russo-Ukrainian War
-
-::: {.incremental}
-
-- Examples of pro-Russian disinformation [@newsguard_2023]:
-    - Russian-speaking residents in Donbas were subjected to genocide.
-    - Nazi ideology is driving Ukraine's political leadership.
-    - The U.S. has a network of bioweapons labs in Eastern Europe.
-- Each narrative uses moral convictions to frame Ukraine and its allies negatively.
-- **Moral convictions** are ideas or feelings of what is fundamentally right or wrong, good or evil, just or unjust [@skitka_2021; @malle_2021].
-- **Moralised messages** are messages that embed _attitudes, objects, activity, or rhetoric_ in moral convictions [@skitka_2021; @rozin_1999; @malle_2021].
-:::
 
 ::: {.notes}
-- Among the real atrocities of the Russo-Ukrainian conflict are faked or misleading narratives.
-- Russian disinformation paints Ukraine as a society rife with genocidal nazis who collude with subversive and violent allies.
-- Although disparate in topic, these narratives share a common characteristic.
-- Each narrative claim Ukraine or its allies violated moral convictions.
-- By moral convictions, I refer to a sense of what is right or wrong, good or evil, just or unjust
-- Moralised messages, be it about fact or fiction, refer to attempts to shift perceptions into a moral domain or heighten existing moral convictions
-- E.g., attempt to link moral concern around nazis with Ukraine's leadership or heighten existing moral concerns with Ukraine's leadership.
+- March last year, Russian disinformation about biolabs entered the American congressional record.
+- The representative of Georgia, Marjorie Taylor Greene, made this statement.
+- Representative Greene is not just making a statement about the physical world, she is also making a statement about the moral world.
+- Specifically, that her own government is causing undue harm to others and has a responsibility to correct its actions.
+- Moral messages, like that of Representative Greene's, convey these feelings of what, and who, is good or bad, right or wrong, just or unjust.
+- Although moral messages are not necessarily untrue, moral misinformation can be particularly potent.
 :::
 
-## Moralised messages
+## The consequences of moral convictions
 
 ::: {.incremental}
-- Disinformation and misinformation can be particularly moralised.
-- Moralised language is more prominent in articles from non-reputable sources [@carrasco-farre_2022].
-- Though, moralised messages are not necessarily less true than neutral messages.
-- E.g., North Atlantic Treaty Organization (NATO) and Vladimir Putin's public addresses in late February, 2022 both leveraged moralised language [@demasi_2022].
-:::
-
-::: {.notes}
-- Russian disinformation is not alone in being moralised
-- A study of nearly 100,000 articles found moralised language was more prominent in articles from non-reputable sources
-- I am NOT saying moralised messages are necessarily untrue and 'neutral' messages are always true
-- In fact, both NATO and Putin used moralised language in their public addresses, which framed each other as immoral aggressors and their own actions as morally righteous and necessary.
-- This is not by chance.
-- Moral messages that resonate with their audience can be particularly powerful.
-:::
-
-## The consequences of moralised messages
-
-::: {.incremental}
-
-Moralised messages can grant their audience three licenses:
 
 1. **License to be uncompromising**
     - Intolerance of disagreement [@garrett_2020; @skitka_2021].
@@ -451,52 +301,124 @@ Moralised messages can grant their audience three licenses:
 - These three licenses give moral misinformation a broad and powerful appeal.
 :::
 
-## Detecting moralised messages in text
 
-::: {.incremental}
+## Moral Foundations Theory
 
-- Moral sentiment inference algorithm [@xie_2019; @ramezani_2021].
-- Natural Language Processing approach which uses word embeddings.
-- Basic idea: words used alongside the same words (neighbours) have similar meaning.
+::: {.column width="15%"}
 
-- > "You shall know a word by the company it keeps" [@firth_1957, pg. 11].
+::: {.fragment fragment-index=1 .center .fade-in-then-semi-out}
 
-- Identified word embeddings from large collection of news articles [known as word2vec, @mikolov_2013].
-- Are the words of a text closer in meaning to moral words or neutral words?
-- Moral words include: "altruism", "pledged", "scripture", "deceit", "inhuman", "kill" [@graham_2009].
-- Neutral words include: "anvil", "anytime", "rudder" [@warriner_2013].
-- Calculate probability that a text is moral (*p<sub>moral</sub>*) or neutral (*p<sub>neutral</sub>*).
 
-- This approach has been used to detect historic changes in moral perceptions, such as perceptions of American democracy and slavery [@xie_2019; @ramezani_2021].
+<svg xmlns="http://www.w3.org/2000/svg" height="4em" viewBox="0 0 576 512"><!--! Font Awesome Free 6.4.2 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. --><path d="M163.9 136.9c-29.4-29.8-29.4-78.2 0-108s77-29.8 106.4 0l17.7 18 17.7-18c29.4-29.8 77-29.8 106.4 0s29.4 78.2 0 108L310.5 240.1c-6.2 6.3-14.3 9.4-22.5 9.4s-16.3-3.1-22.5-9.4L163.9 136.9zM568.2 336.3c13.1 17.8 9.3 42.8-8.5 55.9L433.1 485.5c-23.4 17.2-51.6 26.5-80.7 26.5H192 32c-17.7 0-32-14.3-32-32V416c0-17.7 14.3-32 32-32H68.8l44.9-36c22.7-18.2 50.9-28 80-28H272h16 64c17.7 0 32 14.3 32 32s-14.3 32-32 32H288 272c-8.8 0-16 7.2-16 16s7.2 16 16 16H392.6l119.7-88.2c17.8-13.1 42.8-9.3 55.9 8.5zM193.6 384l0 0-.9 0c.3 0 .6 0 .9 0z"/></svg>
+
+**Care/Harm**
+<br>
+<br>
+👼<br>
+Caring<br>
+Kindness<br>
+<br>
+😈<br>
+Cruelty<br>
+:::
+
+:::
+
+::: {.column width="18%"}
+
+::: {.fragment fragment-index=2 .center .fade-in-then-semi-out}
+
+<svg xmlns="http://www.w3.org/2000/svg" height="4em" viewBox="0 0 640 512"><!--! Font Awesome Free 6.4.2 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. --><path d="M384 32H512c17.7 0 32 14.3 32 32s-14.3 32-32 32H398.4c-5.2 25.8-22.9 47.1-46.4 57.3V448H512c17.7 0 32 14.3 32 32s-14.3 32-32 32H320 128c-17.7 0-32-14.3-32-32s14.3-32 32-32H288V153.3c-23.5-10.3-41.2-31.6-46.4-57.3H128c-17.7 0-32-14.3-32-32s14.3-32 32-32H256c14.6-19.4 37.8-32 64-32s49.4 12.6 64 32zm55.6 288H584.4L512 195.8 439.6 320zM512 416c-62.9 0-115.2-34-126-78.9c-2.6-11 1-22.3 6.7-32.1l95.2-163.2c5-8.6 14.2-13.8 24.1-13.8s19.1 5.3 24.1 13.8l95.2 163.2c5.7 9.8 9.3 21.1 6.7 32.1C627.2 382 574.9 416 512 416zM126.8 195.8L54.4 320H199.3L126.8 195.8zM.9 337.1c-2.6-11 1-22.3 6.7-32.1l95.2-163.2c5-8.6 14.2-13.8 24.1-13.8s19.1 5.3 24.1 13.8l95.2 163.2c5.7 9.8 9.3 21.1 6.7 32.1C242 382 189.7 416 126.8 416S11.7 382 .9 337.1z"/></svg>
+
+**Fairness/Cheating**
+<br>
+<br>
+👼<br>
+Fairness<br>
+Justice<br>
+Honesty<br>
+Trustworthiness<br>
+<br>
+😈<br>
+Dishonesty<br>
+
+:::
+
+:::
+
+::: {.column width="18%"}
+
+::: {.fragment fragment-index=3 .center .fade-in-then-semi-out}
+
+<svg xmlns="http://www.w3.org/2000/svg" height="4em" viewBox="0 0 640 512"><!--! Font Awesome Free 6.4.2 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. --><path d="M72 88a56 56 0 1 1 112 0A56 56 0 1 1 72 88zM64 245.7C54 256.9 48 271.8 48 288s6 31.1 16 42.3V245.7zm144.4-49.3C178.7 222.7 160 261.2 160 304c0 34.3 12 65.8 32 90.5V416c0 17.7-14.3 32-32 32H96c-17.7 0-32-14.3-32-32V389.2C26.2 371.2 0 332.7 0 288c0-61.9 50.1-112 112-112h32c24 0 46.2 7.5 64.4 20.3zM448 416V394.5c20-24.7 32-56.2 32-90.5c0-42.8-18.7-81.3-48.4-107.7C449.8 183.5 472 176 496 176h32c61.9 0 112 50.1 112 112c0 44.7-26.2 83.2-64 101.2V416c0 17.7-14.3 32-32 32H480c-17.7 0-32-14.3-32-32zm8-328a56 56 0 1 1 112 0A56 56 0 1 1 456 88zM576 245.7v84.7c10-11.3 16-26.1 16-42.3s-6-31.1-16-42.3zM320 32a64 64 0 1 1 0 128 64 64 0 1 1 0-128zM240 304c0 16.2 6 31 16 42.3V261.7c-10 11.3-16 26.1-16 42.3zm144-42.3v84.7c10-11.3 16-26.1 16-42.3s-6-31.1-16-42.3zM448 304c0 44.7-26.2 83.2-64 101.2V448c0 17.7-14.3 32-32 32H288c-17.7 0-32-14.3-32-32V405.2c-37.8-18-64-56.5-64-101.2c0-61.9 50.1-112 112-112h32c61.9 0 112 50.1 112 112z"/></svg>
+
+**Loyalty/Betrayal**
+<br>
+<br>
+👼<br>
+Loyalty<br>
+Patriotism<br>
+Self-sacrifice<br>
+<br>
+😈<br>
+Treason<br>
+Cowardice<br>
+
+:::
+
+:::
+
+::: {.column width="21%"}
+
+::: {.fragment fragment-index=4 .center .fade-in-then-semi-out}
+
+<svg xmlns="http://www.w3.org/2000/svg" height="4em" viewBox="0 0 576 512"><!--! Font Awesome Free 6.4.2 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. --><path d="M309 106c11.4-7 19-19.7 19-34c0-22.1-17.9-40-40-40s-40 17.9-40 40c0 14.4 7.6 27 19 34L209.7 220.6c-9.1 18.2-32.7 23.4-48.6 10.7L72 160c5-6.7 8-15 8-24c0-22.1-17.9-40-40-40S0 113.9 0 136s17.9 40 40 40c.2 0 .5 0 .7 0L86.4 427.4c5.5 30.4 32 52.6 63 52.6H426.6c30.9 0 57.4-22.1 63-52.6L535.3 176c.2 0 .5 0 .7 0c22.1 0 40-17.9 40-40s-17.9-40-40-40s-40 17.9-40 40c0 9 3 17.3 8 24l-89.1 71.3c-15.9 12.7-39.5 7.5-48.6-10.7L309 106z"/></svg>
+
+**Authority/Subversion**
+<br>
+<br>
+👼<br>
+Obedience<br>
+Deference<br>
+<br>
+😈<br>
+Disobedience<br>
+:::
+
+
+:::
+
+::: {.column width="20%"}
+
+::: {.fragment fragment-index=5 .center .fade-in-then-semi-out}
+
+<svg xmlns="http://www.w3.org/2000/svg" height="4em" viewBox="0 0 512 512"><!--! Font Awesome Free 6.4.2 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license (Commercial License) Copyright 2023 Fonticons, Inc. --><path d="M208 96a48 48 0 1 0 0-96 48 48 0 1 0 0 96zM320 256a64 64 0 1 0 0-128 64 64 0 1 0 0 128zM416 32a32 32 0 1 0 -64 0 32 32 0 1 0 64 0zm0 160c0 27.6-11.7 52.5-30.4 70.1C422.1 275.7 448 310.8 448 352c0 53-43 96-96 96H160c-53 0-96-43-96-96s43-96 96-96h88.4c-15.2-17-24.4-39.4-24.4-64H96c-53 0-96 43-96 96V416c0 53 43 96 96 96H416c53 0 96-43 96-96V288c0-53-43-96-96-96zM160 288c-35.3 0-64 28.7-64 64s28.7 64 64 64H352c35.3 0 64-28.7 64-64s-28.7-64-64-64H320 160z"/></svg>
+
+**Purity/Degradation**
+<br>
+<br>
+👼<br>
+Temperance<br>
+Chastity<br>
+Piety<br>
+Cleanliness<br>
+<br>
+😈<br>
+Over-indulgence<br>
+Lust<br>
+
+:::
 
 :::
 
 ::: {.notes}
-- This basic idea 'powers' many AI tools you may have encountered, like ChatGPT
-- (e.g., "Facebook" and "Twitter")
+- What kinds of moral messages exist?
+- Moral Foundations Theory posits that moral concerns can be separated into at least five domains, or foundations
+- Each foundation motivates us to excel at challenges common across environments and cultures
+- Let's return to Representative Greene's statement.
+- Explain how tool works
 :::
 
----
-
-## What does *p<sub>moral</sub>* tell us about a message?
-
-::: {.incremental}
-
-Quantify two characteristics:
-
-1. **Moral recognition** - whether an message is at all related to moral convictions.
-    - For any word in a message, is *p<sub>moral</sub>* larger than *p<sub>neutral</sub>*?
-    - Changes can reflect a shift from preference or narrow opinion [@skitka_2021].
-2. **Moral relevance** - degree to which message is related to moral convictions.
-    - For moral words, how large is *p<sub>moral</sub>*?
-    - Changes can reflect a shift in intensity of moral conviction [@skitka_2021].
-:::
-
-::: {.notes}
-- Moral recognition => shift from preference to moral imperative
-- Moral relevance => heightens polarisation, motivations
-- Could list other applications: domain of moral concern, and polarity
-:::
 
 ## An application: moralisation of the Great Barrier Reef by climate change contrarians
 
@@ -511,12 +433,29 @@ methods <- data |>
     mutate(across(everything(), \(.num) prettyNum(.num, ",")))
 ```
 
-::: {.incremental}
+::: {.fragment fragment-index=1}
+
 - Broad scientific consensus that climate change is predominantly caused by human activity [@cook2013; @veckalov_2023].
+
+:::
+
+::: {.fragment fragment-index=2}
+
 - Contrarian arguments challenge scientific consensus and policy implications [@coan_2021; @lamb_2020].
+
+:::
+
+::: {.fragment fragment-index=3}
+
 - Great Barrier Reef is a battleground for climate change debates [@konkes_2021].
-    - 'Bleaching is a sign of catastrophic climate change'.
-    - 'Whenever the reef is bleached, it always recovers'.
+
+:::
+
+
+::: {.fragment fragment-index=4 .center}
+
+![Photo credit: Justin Marshall](assets/marshall.jpg){height=300 fig-align="center"}
+
 :::
 
 ::: {.notes}
@@ -527,6 +466,7 @@ methods <- data |>
 - Consider coral bleaching, where coral under stress loses their vibrant colours. A climate change activist might say ..., whereas a contrarian might say ...
 :::
 
+
 ## An application: moralisation of the Great Barrier Reef by climate change contrarians
 
 ::: {.callout-note appearance="simple"}
@@ -535,67 +475,189 @@ Do climate change contrarians post more moralised messages about the Great Barri
 :::
 
 ::: {.incremental}
-- Used tweet archive from CSIRO's Emergency Situation Awareness platform [@csiro_2023; @power2014; @power_2023].
+- Collected tweets from CSIRO's Emergency Situation Awareness archive [@csiro_2023; @power2014; @power_2023].
 - Retrieved English tweets posted by Australian users that mentioned the Great Barrier Reef.
-- Examined two groups of users based on text in tweets:
-    1. **Contrarians**. `r methods$n_users[2]` users who posted `r methods$n_tweets[2]` tweets (e.g., "#ClimateCult", "alaramists")
-    2. **Baseline**. `r methods$n_users[1]` users who posted `r methods$n_tweets[1]` tweets (e.g., "#ClimateChange", "#ClimateAction")
 :::
 
-::: {.notes}
-- The Emergency Situation Awareness has streamed and archived tweets.
-- Specifically, from accounts identified as posting from Australia via diagnostic features, such as geolocation information, and places mentioned in user biographies and tweets.
-- We retrieved English tweets posted by Australian users that mentioned the Great Barrier Reef (or “#greatbarrierreef”), posted between October 2011 and April 2023.
+## An application: moralisation of the Great Barrier Reef by climate change contrarians
+
+::: {.column width="45%"}
+
+::: {.fragment fragment-index=1 .center}
+
+1. **Contrarian**
+
+- Used a contrarian phrase in a Great Barrier Reef tweet:
+    - "#ClimateCult"
+    - "climate hysteria"
+    - "alarmist"
+
+**`r methods$n_users[2]` users**
+
+**`r methods$n_tweets[2]` tweets about the Great Barrier Reef**
+
+:::
+
+:::
+
+
+::: {.column width="45%"}
+
+::: {.fragment fragment-index=2 .center}
+
+2. **Baseline**
+
+- Used a climate change phrase in a Great Barrier Reef tweet:
+    - "climate change"
+    - "#ClimateAction"
+    - "#ClimateEmergency"
+
+**`r methods$n_users[1]` users**
+
+**`r methods$n_tweets[1]` tweets about the Great Barrier Reef**
+
+:::
+
 :::
 
 ---
 
 ## An application: moralisation of the Great Barrier Reef by climate change contrarians
 
-::: {.incremental}
-- Generally, content was moralised and negative (e.g., "immoral", "vile", "selfishness").
--  **Moral recongition**. The proportion of moral tweets posted by contrarians (`r specify_decimal(filter(results, sentiment == 'recognition' & is.na(entity))$p_contrarian * 100)`%) was greater than the proportion of moral tweets posted by the baseline (`r specify_decimal(filter(results, sentiment == 'recognition' & is.na(entity))$p_baseline * 100)`%), *p* < .001.
-- **Moral relevance**. The intensity of moral tweets was greater for contrarians (*p<sub>moral</sub>* = `r specify_decimal(filter(results, sentiment == 'relevance' & is.na(entity))$p_contrarian, 4)`) than the baseline group (*p<sub>moral</sub>* = `r specify_decimal(filter(results, sentiment == 'relevance' & is.na(entity))$p_baseline, 4)`), *p* = `r specify_decimal(filter(results, sentiment == 'relevance' & is.na(entity))$log_odds_p_value, 3)`.
-- Contrarians uploaded more moral content about the Great Barrier Reef than other users.
-:::
+```{r}
+data |>
+    group_by(condition, recognition) |>
+    summarise(n = n_distinct(id)) |>
+    mutate(per = n / sum(n) * 100) |>
+    filter(recognition) |>
+    ungroup() |>
+    select(condition, per) |>
+    pivot_wider(names_from = "condition", values_from = "per") |>
+    mutate(x = 1) |>
+    ggplot() +
+    geom_segment(aes(x=x, xend=x, y=baseline, yend=contrarian), color="black", linewidth = 2) +
+    geom_point(aes(x=x, y=baseline), color="#009392", size= 7 ) +
+    geom_point(aes(x=x, y=contrarian), color="#d0587e", size= 7 ) +
+    annotate("text", x = 1.02, y = 65, label = "Baseline", colour = "#009392", size = 7) +
+    annotate("text", x = 1.02, y = 71, label = "Contrarian", colour = "#d0587e", size = 7) +
+    coord_flip() +
+    # Add theme
+    theme_main() +
+    scale_y_continuous(
+        name = "Proportion of moral tweets",
+        limits = c(50, 80),
+        breaks = seq(0, 100, 5),
+        expand = c(0.1, 0),
+        labels = function(x) paste0(x, "%")
+    ) +
+    scale_x_continuous(
+        limits = c(.95, 1.1),
+        expand = c(0, 0)
+    ) +
+    xlab("") +
+    theme(axis.ticks.y.left = element_blank()) +
+    theme(axis.text.y = element_blank())
+```
+
 
 ::: {.notes}
 - Contrarians uploaded more moral content about the Great Barrier Reef than other users. For contrarians, discourse of the Great Barrier Reef was more often, and more strongly, connected to broader moral convictions on what is right and wrong.
 - However, other users also often share moralised messages.
 - Indicates a hostile space, where 'both sides' may be uncompromising, hostile to alternative views, and might be vulnerable to sharing falsehoods consistent with ones moral stance.
+- 65.1% to 70.7% (+5.6%)
+:::
+
+## An application: moralisation of the Great Barrier Reef by climate change contrarians
+
+```{r}
+data |>
+    filter(is_vice) |>
+    group_by(condition, foundation) |>
+    summarise(n = n_distinct(id)) |>
+    mutate(per = n / sum(n) * 100) |>
+    mutate(foundation = fct_relabel(foundation, str_to_title)) |>
+    ungroup() |>
+    select(-n) |>
+    pivot_wider(names_from = "condition", values_from = "per") |>
+    arrange(baseline) |>
+    mutate(foundation = fct_reorder(foundation, 1:n())) |>
+    ggplot() +
+    geom_segment(aes(x=foundation, xend=foundation, y=baseline, yend=contrarian), color="black", linewidth = 2) +
+    geom_point(aes(x=foundation, y=baseline), color="#009392", size= 7 ) +
+    geom_point(aes(x=foundation, y=contrarian), color="#d0587e", size= 7 ) +
+    annotate("text", x = 4.5, y = 54.8, label = "Baseline", colour = "#009392", size = 7) +
+    annotate("text", x = 4.5, y = 45.4, label = "Contrarian", colour = "#d0587e", size = 7) +
+    coord_flip() +
+    # Add theme
+    theme_main() +
+    scale_y_continuous(
+        name = "Proportion of vice tweets",
+        limits = c(0, 75),
+        breaks = seq(0, 100, 10),
+        expand = c(0, 0),
+        labels = function(x) paste0(x, "%")
+    ) +
+    xlab("")
+
+```
+
+::: {.notes}
+  foundation  baseline contrarian
+  <fct>          <dbl>      <dbl>
+1 Betrayal       0.322      0.284
+2 Subversion     5.96      11.2
+3 Degradation   15.7       18.5
+4 Cheating      18.2       24.6
+5 Harm          59.8       45.4
 :::
 
 ## Other applications
 
 ::: {.incremental}
 
-- Detecting moralised messages of the Great Barrier Reef:
-    - Moralised messages at the level of an entity ('thing').
-    - Moralised messages at the level of users.
-- Tracking moralised messages over time, of a particular entity or emerging event.
-- Can be used to indicate polarity (vices versus virtues) and domain of moral concern (e.g., fairness, harm).
-- Can inform communication strategies [@feinberg_2019; @kodapanakkal_2022a]:
-    - **Moral framing**. Messages that appeal to the perceived moral basis of an issue.
-    - **Non-moral framing**. Neutral messages to de-escalate conflict.
-- Approach to detecting moralised messages in any text (e.g., news articles, speeches).
-- Can be useful across different topics.
-- Can be useful when truth is not known and emerging.
+- Identify moral characteristics of dis/misinformation
+- Detecting success of disinformation campaign
+- Identify users who may be predisposed to believe or share dis/misinformation
+- Identify counter-strategies to communicate in moral or neutral terms
+
 :::
 
 ::: {.notes}
 - Skip if out of time
 :::
 
+---
+
+![](assets/mtg.png){height=400 fig-align="center"}
+
+::: {.fragment .fade-in-then-semi-out}
+"Now, what if these [American] biolabs are handling very dangerous pathogens that may lead to the deaths in people in the areas? There are reports of possibly deadly pathogens escaping these biolabs in places like Ukraine, Georgia, Kazakhstan, that is responsible for killing people...
+:::
+::: {.fragment}
+"What if that's true? I think these are questions that we should ask because no american citizen wants to be held morally and ethically responsible and the U.S. government should not be funding something that's killing people in a country that's not even our own, let alone here at home." [@greene_2022]
+:::
+
+
+
 ## Summary
 
-> Misinformation may be more consequential and likely when messages are moralised.
+> Misinformation embedded in morals can be particularly potent
 
-::: {.incremental}
+- Moral convictions can motivate people to be uncompromising, be hostile to those with different views, and share misinformation.
+- We can detect moral messages with Natural Language Processing techniques.
+- Demonstrated an application to understand climate change contrarian messages.
+
+::: {.notes}
+- Misinformation may be more consequential and likely when messages are moral.
+- Moral messages can be detected using Natural Language Processing techniques.
+- By detecting morals, we can better understand users and messages.
+
 - Disinformation and misinformation are often embedded in broader moral convictions of what is right and wrong.
 - Moral convictions can motivate people to be uncompromising, be hostile to those with different views, and share misinformation.
 - Moralised messages are not necessarily false.
 - Detecting moralised messages can help identify issues where falsehoods are more likely to be shared, to be believed, and to be consequential.
-- Moralised messages can be detected by a moral sentiment inference algorithm.
+- Moralised messages can be detected using Natural Language Processing techniques.
+- 
 - An application demonstrated users who posted climate change contrarian content are more likely to post moralised messages about the Great Barrier Reef than other users.
 :::
 
