@@ -62,9 +62,9 @@ knitr:
 <br/>
 
 ::: {.incremental}
-1. The **concept** of moralised misinformation.
+1. The **concept** of moral misinformation.
 2. A **tool** for detecting moral messages.
-3. An **application** of the tool to environment discourse on Twitter/X.
+3. An **application** of the tool.
 4. Potential **applications** for the Russo-Ukraine War.
 :::
 
@@ -645,7 +645,7 @@ data |>
 
 - Moral convictions can motivate people to be uncompromising, be hostile to those with different views, and share misinformation.
 - We can detect moral messages with Natural Language Processing techniques.
-- Demonstrated an application to understand climate change contrarian messages.
+- Climate change contrarian tweets have a unique moral signature.
 
 ::: {.notes}
 - Misinformation may be more consequential and likely when messages are moral.
