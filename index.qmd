@@ -376,7 +376,6 @@ Patriotism<br>
 Self-sacrifice<br>
 <br>
 😈<br>
-Treason<br>
 Cowardice<br>
 
 :::
@@ -633,7 +632,6 @@ data |>
 - Identify moral characteristics of dis/misinformation
 - Detecting success of disinformation campaign
 - Identify users who may be predisposed to believe or share dis/misinformation
-- Identify counter-strategies to communicate in moral or neutral terms
 
 :::
 
