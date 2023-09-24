@@ -268,20 +268,35 @@ data <- data |>
 
 ## The consequences of moral convictions
 
-::: {.incremental}
+::: {.column width="30%"}
 
+::: {.fragment fragment-index=1 .center .fade-in-then-semi-out}
 1. **License to be uncompromising**
     - Intolerance of disagreement [@garrett_2020; @skitka_2021].
     - Harder to persuade [@kodapanakkal_2022a; @ryan_2017].
+:::
 
+:::
+
+::: {.column width="30%"}
+
+::: {.fragment fragment-index=2 .fade-in-then-semi-out}
 2. **License to act with with the like-minded**
     - Cooperation and selflessness [@curry_2019a; @spring_2018; @hoover_2018].
     - Violence and hate [@kennedy_2023; @solovev_2022].
+:::
 
+:::
+
+::: {.column width="30%"}
+
+::: {.fragment fragment-index=3 .fade-in-then-semi-out}
 3. **License to share falsehoods**
     - Moral contagion [@brady_2020; @brady_2023; @brady_2021a].
     - Illusory truth effects [@ecker_2022].
     - Pre-factual thinking and gist [@helgason_2022].
+:::
+
 :::
 
 ::: {.notes}
